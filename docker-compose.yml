@@ -1,0 +1,47 @@
+version: "3.9"
+
+# Local development stack only.
+# Production deploys to Render — this file is for running locally
+# without needing a Supabase account.
+
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app      # hot-reload in development
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+
+  postgres:
+    image: ankane/pgvector:latest    # Postgres 16 + pgvector extension
+    environment:
+      POSTGRES_USER: skonga
+      POSTGRES_PASSWORD: skonga_dev
+      POSTGRES_DB: skonga_library
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skonga -d skonga_library"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./app/db/migrations/initial_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  pgdata:
