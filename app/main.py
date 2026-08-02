@@ -18,13 +18,19 @@ from app.config import settings
 from app.api.v1 import health, subjects, topics, search, rag
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
     # Startup: verify DB is reachable before accepting traffic
+ @asynccontextmanager
+async def lifespan(app: FastAPI):
     from app.db.session import engine
     from sqlalchemy import text
-    with engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
+
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        print("✅ Database connected")
+    except Exception as e:
+        print(f"⚠️ Database connection failed: {e}")
+
     yield
     # Shutdown: nothing special needed for Phase 1
 
