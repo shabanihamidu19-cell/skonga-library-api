@@ -21,6 +21,7 @@ from app.api.v1 import health, subjects, topics, search, rag
     # Startup: verify DB is reachable before accepting traffic
  @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Startup: verify DB is reachable before accepting traffic
     from app.db.session import engine
     from sqlalchemy import text
 
@@ -32,6 +33,7 @@ async def lifespan(app: FastAPI):
         print(f"⚠️ Database connection failed: {e}")
 
     yield
+    # Shutdown: nothing special needed for Phase 1
     # Shutdown: nothing special needed for Phase 1
 
 
