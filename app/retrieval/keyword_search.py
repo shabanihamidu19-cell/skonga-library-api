@@ -6,14 +6,19 @@ This is the Phase 1 retrieval engine — Phase 2 will add vector
 (semantic) search on top of this, keeping the keyword path as a
 fast fallback.
 
-Design: a two-stage query:
-  1. Filter by subject_id / form_id if hints are provided (fast index)
-  2. Rank remaining topics by full-text relevance score
+Latency notes (Phase 1.1):
+  - plainto_tsquery is computed once via CTE (was evaluated twice).
+  - content_md is only SELECTed when include_content=True.
+  - ILIKE fuzzy fallback runs ONLY when subject_id or form_id is set
+    (leading-wildcard ILIKE cannot use indexes → sequential scan).
+  - Without filters, empty full-text result returns immediately.
 """
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.db.models import Topic
+
+def _content_select(include_content: bool) -> str:
+    return "content_md," if include_content else "NULL::text AS content_md,"
 
 
 def keyword_search(
@@ -23,20 +28,15 @@ def keyword_search(
     form_id: int | None = None,
     top_k: int = 5,
     status_filter: str = "published",
+    include_content: bool = True,
 ) -> list[dict]:
     """
     Search topics by keyword using Postgres full-text search.
 
     Returns a list of dicts (not ORM objects) for easy JSON serialisation.
     Each dict contains: id, subject_id, form_id, title_en, title_sw,
-    difficulty, status, relevance (float).
+    difficulty, status, content_md (or None), relevance (float).
     """
-    # Build the parameterised query.
-    # We use a raw SQL query here for two reasons:
-    #   1. tsvector relevance ranking (ts_rank) is hard to express cleanly
-    #      through SQLAlchemy ORM without losing clarity.
-    #   2. The GENERATED column `search_vector` cannot be referenced easily
-    #      through ORM column descriptors.
     filters = ["status = :status"]
     params: dict = {"query": query, "status": status_filter, "top_k": top_k}
 
@@ -49,24 +49,28 @@ def keyword_search(
         params["form_id"] = form_id
 
     where_clause = " AND ".join(filters)
+    content_col = _content_select(include_content)
 
-    # plainto_tsquery converts a natural language query to a tsquery safely
-    # (no syntax errors from user input, unlike to_tsquery).
+    # CTE evaluates plainto_tsquery once (avoids double computation in
+    # SELECT rank + WHERE match).
     sql = text(f"""
+        WITH q AS (
+            SELECT plainto_tsquery('simple', :query) AS tsq
+        )
         SELECT
-            id,
-            subject_id,
-            form_id,
-            order_index,
-            title_en,
-            title_sw,
-            difficulty,
-            status,
-            content_md,
-            ts_rank(search_vector, plainto_tsquery('simple', :query)) AS relevance
-        FROM topics
+            t.id,
+            t.subject_id,
+            t.form_id,
+            t.order_index,
+            t.title_en,
+            t.title_sw,
+            t.difficulty,
+            t.status,
+            {content_col}
+            ts_rank(t.search_vector, q.tsq) AS relevance
+        FROM topics t, q
         WHERE {where_clause}
-          AND search_vector @@ plainto_tsquery('simple', :query)
+          AND t.search_vector @@ q.tsq
         ORDER BY relevance DESC
         LIMIT :top_k
     """)
@@ -81,14 +85,20 @@ def fuzzy_fallback(
     subject_id: str | None = None,
     form_id: int | None = None,
     top_k: int = 5,
+    include_content: bool = True,
 ) -> list[dict]:
     """
     ILIKE-based fallback for when the full-text query returns zero results
     (e.g. the user typed a partial word or a word not in the tsvector index).
-    Slower than tsvector but covers edge cases gracefully.
+
+    WARNING: leading-wildcard ILIKE cannot use B-tree/GIN indexes and can
+    cause sequential scans. Callers must only invoke this when subject_id
+    and/or form_id narrow the candidate set.
     """
     filters = ["status = 'published'"]
-    params: dict = {"pattern": f"%{query}%", "top_k": top_k}
+    # Cap pattern length to avoid pathological scans
+    safe_query = (query or "").strip()[:80]
+    params: dict = {"pattern": f"%{safe_query}%", "top_k": top_k}
 
     if subject_id:
         filters.append("subject_id = :subject_id")
@@ -98,12 +108,13 @@ def fuzzy_fallback(
         params["form_id"] = form_id
 
     where_clause = " AND ".join(filters)
+    content_col = _content_select(include_content)
 
     sql = text(f"""
         SELECT
             id, subject_id, form_id, order_index,
             title_en, title_sw, difficulty, status,
-            content_md,
+            {content_col}
             0.5 AS relevance
         FROM topics
         WHERE {where_clause}
@@ -122,16 +133,28 @@ def search_topics(
     subject_id: str | None = None,
     form_id: int | None = None,
     top_k: int = 5,
+    include_content: bool = True,
 ) -> tuple[list[dict], str]:
     """
     Entry-point for the retrieval layer: tries full-text first,
-    falls back to ILIKE if no results.
+    falls back to ILIKE only when subject/form filters are present
+    (so the scan is bounded).
+
     Returns (results, retrieval_mode) where retrieval_mode is
-    'fulltext' or 'fuzzy_fallback' — logged for diagnostics.
+    'fulltext', 'fuzzy_fallback', or 'fulltext_empty'.
     """
-    results = keyword_search(db, query, subject_id, form_id, top_k)
+    results = keyword_search(
+        db, query, subject_id, form_id, top_k, include_content=include_content
+    )
     if results:
         return results, "fulltext"
 
-    results = fuzzy_fallback(db, query, subject_id, form_id, top_k)
-    return results, "fuzzy_fallback"
+    # Avoid unbounded sequential scan when no filters are provided.
+    if subject_id or form_id:
+        results = fuzzy_fallback(
+            db, query, subject_id, form_id, top_k, include_content=include_content
+        )
+        if results:
+            return results, "fuzzy_fallback"
+
+    return [], "fulltext_empty"
