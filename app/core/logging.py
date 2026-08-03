@@ -51,18 +51,22 @@ def log_rag_request(
     took_ms: float,
     retrieval_mode: str,
     results_count: int,
+    extra: dict[str, Any] | None = None,
 ) -> None:
+    payload: dict[str, Any] = {
+        "query_hash": _hash_query(query),
+        "subject_hint": subject_hint,
+        "form_hint": form_hint,
+        "retrieval_mode": retrieval_mode,
+        "results_count": results_count,
+    }
+    if extra:
+        payload.update(extra)
     log_request(
         endpoint="/rag/context",
         status_code=status_code,
         took_ms=took_ms,
-        extra={
-            "query_hash": _hash_query(query),
-            "subject_hint": subject_hint,
-            "form_hint": form_hint,
-            "retrieval_mode": retrieval_mode,
-            "results_count": results_count,
-        },
+        extra=payload,
     )
 
 
