@@ -1,10 +1,7 @@
 """
-SKONGA Library API — Search Endpoint
-=======================================
-POST /internal/v1/search
-
-Keyword-based topic search using Postgres full-text (Phase 1).
-Phase 2 will extend this with vector similarity on content_chunks.
+SKONGA Library API — Search Endpoint (hardened)
+================================================
+Wraps the search function with defensive error handling and logging.
 """
 import time
 
@@ -12,8 +9,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.core.logging import log_request
+from app.core.logging import log_request, log_error
 from app.core.security import verify_service_token
+from app.config import settings
 from app.db.session import get_db
 from app.retrieval.keyword_search import search_topics
 
@@ -51,22 +49,28 @@ def search(
     _token: str = Depends(verify_service_token),
 ):
     start = time.perf_counter()
+    try:
+        results, mode = search_topics(
+            db=db,
+            query=body.query,
+            subject_id=body.subject_id,
+            form_id=body.form_id,
+            top_k=body.top_k,
+        )
 
-    results, mode = search_topics(
-        db=db,
-        query=body.query,
-        subject_id=body.subject_id,
-        form_id=body.form_id,
-        top_k=body.top_k,
-    )
+        took_ms = (time.perf_counter() - start) * 1000
+        log_request(endpoint="/search", status_code=200, took_ms=took_ms,
+                    extra={"retrieval_mode": mode, "results": len(results)})
 
-    took_ms = (time.perf_counter() - start) * 1000
-    log_request(endpoint="/search", status_code=200, took_ms=took_ms,
-                extra={"retrieval_mode": mode, "results": len(results)})
-
-    return {
-        "results": results,
-        "retrieval_mode": mode,
-        "took_ms": round(took_ms, 2),
-        "total": len(results),
-    }
+        return {
+            "results": results,
+            "retrieval_mode": mode,
+            "took_ms": round(took_ms, 2),
+            "total": len(results),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        took_ms = (time.perf_counter() - start) * 1000
+        log_error(endpoint="/search", error=str(exc), took_ms=took_ms)
+        raise HTTPException(status_code=500, detail="Internal server error")

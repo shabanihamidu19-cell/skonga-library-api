@@ -16,10 +16,16 @@ Design decisions:
 import hashlib
 import hmac
 
-from fastapi import Header, HTTPException, Security, status
+from fastapi import HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.config import settings
+
+# Fail fast if SERVICE_TOKEN_HASH is not configured — avoids obscure errors later
+if not getattr(settings, "SERVICE_TOKEN_HASH", None):
+    raise RuntimeError(
+        "SERVICE_TOKEN_HASH is not configured. Set SERVICE_TOKEN_HASH env var to the SHA-256 hex of the service token."
+    )
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
