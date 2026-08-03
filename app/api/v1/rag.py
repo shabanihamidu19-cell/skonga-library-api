@@ -9,14 +9,12 @@ The response provides:
   - context_text: a formatted block ready to inject into the LLM system prompt
   - citations: structured topic references for the UI to display ("Source: ...")
 
-Flow:
-  1. SKONGA AI Backend receives student question
-  2. Calls POST /rag/context with the question + optional hints
-  3. This endpoint retrieves the most relevant curriculum topics
-  4. Builds and returns context_text + citations
-  5. AI Backend injects context_text into LLM prompt
-  6. LLM generates a curriculum-aligned answer
+Latency instrumentation (Phase 1.1):
+  Response includes timing breakdown when ENVIRONMENT != production
+  (cache_ms, search_ms, build_ms) so operators can diagnose slow requests.
+  Production still returns took_ms only (lean response).
 """
+import hashlib
 import time
 
 from fastapi import APIRouter, Depends
@@ -73,6 +71,16 @@ class RAGResponse(BaseModel):
     topics_found: int
     took_ms: float
     curriculum_aligned: bool
+    # Optional diagnostics — present when ENVIRONMENT != production
+    cache_hit: bool | None = None
+    cache_ms: float | None = None
+    search_ms: float | None = None
+    build_ms: float | None = None
+
+
+def _normalize_query(q: str) -> str:
+    """Lowercase + collapse whitespace for stable cache keys."""
+    return " ".join((q or "").lower().split())
 
 
 @router.post("/context", response_model=RAGResponse)
@@ -88,29 +96,48 @@ def get_rag_context(
     Returns a ready-to-use context block and structured citations.
     """
     start = time.perf_counter()
+    debug = settings.ENVIRONMENT != "production"
 
-    # Cache key: hash of the query + hints
-    import hashlib
-    raw_key = f"{body.query}|{body.subject_hint}|{body.form_hint}|{body.top_k}"
+    # Cache key: normalized query + hints + include_content
+    normalized = _normalize_query(body.query)
+    raw_key = (
+        f"{normalized}|{body.subject_hint}|{body.form_hint}|"
+        f"{body.top_k}|{int(body.include_content)}"
+    )
     cache_key = "rag:" + hashlib.sha256(raw_key.encode()).hexdigest()[:24]
 
+    t0 = time.perf_counter()
     cached = cache_get(cache_key)
+    cache_ms = (time.perf_counter() - t0) * 1000
+
     if cached:
         took_ms = (time.perf_counter() - start) * 1000
         cached["took_ms"] = round(took_ms, 2)
+        if debug:
+            cached["cache_hit"] = True
+            cached["cache_ms"] = round(cache_ms, 2)
+            cached["search_ms"] = 0.0
+            cached["build_ms"] = 0.0
         return cached
 
     # ── Retrieval ──────────────────────────────────────────────────────────
+    t1 = time.perf_counter()
     topics, retrieval_mode = search_topics(
         db=db,
         query=body.query,
         subject_id=body.subject_hint,
         form_id=body.form_hint,
         top_k=body.top_k,
+        include_content=body.include_content,
     )
+    search_ms = (time.perf_counter() - t1) * 1000
 
     # ── Context assembly ───────────────────────────────────────────────────
-    context_text, citations = build_context(topics, retrieval_mode, include_content=body.include_content)
+    t2 = time.perf_counter()
+    context_text, citations = build_context(
+        topics, retrieval_mode, include_content=body.include_content
+    )
+    build_ms = (time.perf_counter() - t2) * 1000
 
     took_ms = (time.perf_counter() - start) * 1000
     log_rag_request(
@@ -121,6 +148,12 @@ def get_rag_context(
         took_ms=took_ms,
         retrieval_mode=retrieval_mode,
         results_count=len(topics),
+        extra={
+            "cache_hit": False,
+            "cache_ms": round(cache_ms, 2),
+            "search_ms": round(search_ms, 2),
+            "build_ms": round(build_ms, 2),
+        },
     )
 
     result = {
@@ -131,6 +164,11 @@ def get_rag_context(
         "took_ms": round(took_ms, 2),
         "curriculum_aligned": len(topics) > 0,
     }
+    if debug:
+        result["cache_hit"] = False
+        result["cache_ms"] = round(cache_ms, 2)
+        result["search_ms"] = round(search_ms, 2)
+        result["build_ms"] = round(build_ms, 2)
 
     # Cache only if we got results (empty results may improve with more data)
     if topics:
