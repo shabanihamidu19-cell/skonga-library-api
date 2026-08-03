@@ -8,7 +8,7 @@ Phase 2 will extend this with vector similarity on content_chunks.
 """
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -25,6 +25,10 @@ class SearchRequest(BaseModel):
     subject_id: str | None = None
     form_id: int | None = Field(None, ge=1, le=6)
     top_k: int = Field(default=5, ge=1, le=20)
+    include_content: bool = Field(
+        default=False,
+        description="Search results usually only need metadata; set True to pull content_md.",
+    )
 
 
 class SearchResult(BaseModel):
@@ -58,15 +62,34 @@ def search(
         subject_id=body.subject_id,
         form_id=body.form_id,
         top_k=body.top_k,
+        include_content=body.include_content,
     )
 
     took_ms = (time.perf_counter() - start) * 1000
-    log_request(endpoint="/search", status_code=200, took_ms=took_ms,
-                extra={"retrieval_mode": mode, "results": len(results)})
+    log_request(
+        endpoint="/search",
+        status_code=200,
+        took_ms=took_ms,
+        extra={"retrieval_mode": mode, "results": len(results)},
+    )
+
+    # Strip content_md from list response (schema is metadata-only)
+    slim = [
+        {
+            "id": r["id"],
+            "subject_id": r["subject_id"],
+            "form_id": r["form_id"],
+            "title_en": r["title_en"],
+            "title_sw": r["title_sw"],
+            "difficulty": r.get("difficulty"),
+            "relevance": float(r.get("relevance") or 0),
+        }
+        for r in results
+    ]
 
     return {
-        "results": results,
+        "results": slim,
         "retrieval_mode": mode,
         "took_ms": round(took_ms, 2),
-        "total": len(results),
+        "total": len(slim),
     }
