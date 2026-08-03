@@ -18,10 +18,15 @@ from app.config import settings
 from app.api.v1 import health, subjects, topics, search, rag
 
 
-    # Startup: verify DB is reachable before accepting traffic
- @asynccontextmanager
+@asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: verify DB is reachable before accepting traffic
+    """Startup/shutdown lifecycle for the app.
+
+    Startup verifies the database is reachable before accepting traffic.
+    If the database is not reachable we raise to prevent the process from
+    starting and accepting requests. This aligns with the readiness probe
+    behaviour in /ready.
+    """
     from app.db.session import engine
     from sqlalchemy import text
 
@@ -30,10 +35,11 @@ async def lifespan(app: FastAPI):
             conn.execute(text("SELECT 1"))
         print("✅ Database connected")
     except Exception as e:
+        # Fail fast so the process doesn't accept traffic when DB is down
         print(f"⚠️ Database connection failed: {e}")
+        raise
 
     yield
-    # Shutdown: nothing special needed for Phase 1
     # Shutdown: nothing special needed for Phase 1
 
 
@@ -51,9 +57,11 @@ app = FastAPI(
 # Compress responses larger than 1KB — helpful for large subject lists
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-# ── Register routers ───────────────────────────────────────────────────────────
+# ── Register routers ────────────────────────────────────────────────────────
 API_PREFIX = "/internal/v1"
 
+# health has its own paths (e.g. /health, /ready) and should be mounted without
+# the API prefix so external platform health checks keep working.
 app.include_router(health.router)                          # /health, /ready
 app.include_router(subjects.router, prefix=API_PREFIX)     # /internal/v1/subjects
 app.include_router(topics.router,   prefix=API_PREFIX)     # /internal/v1/topics
