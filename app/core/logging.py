@@ -15,12 +15,21 @@ from typing import Any
 
 from app.config import settings
 
-logging.basicConfig(level=settings.LOG_LEVEL.upper())
+# Defensive LOG_LEVEL handling — fall back to INFO if an invalid level is provided
+try:
+    level_name = settings.LOG_LEVEL.upper() if isinstance(settings.LOG_LEVEL, str) else "INFO"
+    level_value = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(level=level_value)
+except Exception:
+    logging.basicConfig(level=logging.INFO)
+
 _log = logging.getLogger("skonga_library")
 
 
 def _hash_query(query: str) -> str:
     """Short hash of a user query for correlation without exposing content."""
+    if query is None:
+        query = ""
     return hashlib.sha256(query.encode()).hexdigest()[:16]
 
 

@@ -31,12 +31,16 @@ def keyword_search(
     Each dict contains: id, subject_id, form_id, title_en, title_sw,
     difficulty, status, relevance (float).
     """
+    if not query or not isinstance(query, str):
+        raise ValueError("query must be a non-empty string")
+
+    # sanitize and cap top_k
+    try:
+        top_k = max(1, min(int(top_k), 50))
+    except Exception:
+        top_k = 5
+
     # Build the parameterised query.
-    # We use a raw SQL query here for two reasons:
-    #   1. tsvector relevance ranking (ts_rank) is hard to express cleanly
-    #      through SQLAlchemy ORM without losing clarity.
-    #   2. The GENERATED column `search_vector` cannot be referenced easily
-    #      through ORM column descriptors.
     filters = ["status = :status"]
     params: dict = {"query": query, "status": status_filter, "top_k": top_k}
 
@@ -72,7 +76,16 @@ def keyword_search(
     """)
 
     rows = db.execute(sql, params).mappings().all()
-    return [dict(row) for row in rows]
+    results = []
+    for row in rows:
+        r = dict(row)
+        # ensure relevance is a float for JSON serialisation
+        try:
+            r["relevance"] = float(r.get("relevance") or 0.0)
+        except Exception:
+            r["relevance"] = 0.0
+        results.append(r)
+    return results
 
 
 def fuzzy_fallback(
@@ -87,6 +100,14 @@ def fuzzy_fallback(
     (e.g. the user typed a partial word or a word not in the tsvector index).
     Slower than tsvector but covers edge cases gracefully.
     """
+    if not query or not isinstance(query, str):
+        raise ValueError("query must be a non-empty string")
+
+    try:
+        top_k = max(1, min(int(top_k), 50))
+    except Exception:
+        top_k = 5
+
     filters = ["status = 'published'"]
     params: dict = {"pattern": f"%{query}%", "top_k": top_k}
 
@@ -113,7 +134,12 @@ def fuzzy_fallback(
     """)
 
     rows = db.execute(sql, params).mappings().all()
-    return [dict(row) for row in rows]
+    results = []
+    for row in rows:
+        r = dict(row)
+        r["relevance"] = 0.5
+        results.append(r)
+    return results
 
 
 def search_topics(

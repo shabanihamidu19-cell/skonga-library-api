@@ -8,7 +8,7 @@ deploy Phase 1 without Redis and add it later with zero code changes.
 """
 import json
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from app.config import settings
 
@@ -24,6 +24,7 @@ def _get_client():
         return None
     try:
         import redis  # type: ignore
+
         _redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
         _redis_client.ping()
         _log.info("Redis connection established")
@@ -33,14 +34,21 @@ def _get_client():
     return _redis_client
 
 
-def cache_get(key: str) -> Any | None:
+def cache_get(key: str) -> Optional[Any]:
     client = _get_client()
     if client is None:
         return None
     try:
         raw = client.get(key)
-        return json.loads(raw) if raw else None
-    except Exception:
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            _log.warning("Cache key %s contained non-JSON data", key)
+            return None
+    except Exception as exc:
+        _log.debug("Redis get failed for key %s: %s", key, exc)
         return None
 
 
@@ -50,7 +58,8 @@ def cache_set(key: str, value: Any, ttl: int) -> None:
         return
     try:
         client.setex(key, ttl, json.dumps(value, ensure_ascii=False))
-    except Exception:
+    except Exception as exc:
+        _log.debug("Redis set failed for key %s: %s", key, exc)
         pass  # cache failures are silent — data still served from DB
 
 
@@ -60,5 +69,6 @@ def cache_delete(key: str) -> None:
         return
     try:
         client.delete(key)
-    except Exception:
+    except Exception as exc:
+        _log.debug("Redis delete failed for key %s: %s", key, exc)
         pass
